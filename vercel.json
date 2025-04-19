@@ -1,34 +1,34 @@
-// my-journal-app/vercel.json
+
 {
     "version": 2,
     "builds": [
       {
-        // Define the serverless function build for your API
-        "src": "server.js", // Path to your main backend file
-        "use": "@vercel/node" // Use the Node.js runtime
+        
+        "src": "server.js", 
+        "use": "@vercel/node" 
       },
       {
-        // Define the static site build for your Vite frontend
-        "src": "package.json", // Use package.json to find build script
-        "use": "@vercel/static-build", // Use the static build runtime
+        
+        "src": "package.json", 
+        "use": "@vercel/static-build", 
         "config": {
-          // Vite builds output to the 'dist' directory by default
+         
           "distDir": "dist"
         }
       }
     ],
     "rewrites": [
-      // Rewrite any request starting with /api/ to the serverless function
+      
       {
-        "source": "/api/(.*)", // Match any path starting with /api/
-        "destination": "/api/server" // Route it to the built serverless function
-                                       // Vercel automatically maps this to the file defined in builds
+        "source": "/api/(.*)", 
+        "destination": "/api/server"
+                                       
       },
-      // Rewrite all other requests to serve the frontend's index.html
-      // This handles client-side routing (React Router)
+    
+      
       {
-        "source": "/((?!api/).*)", // Match anything that DOES NOT start with /api/
-        "destination": "/index.html" // Serve the main frontend file
+        "source": "/((?!api/).*)", 
+        "destination": "/index.html" 
       }
     ]
   }

@@ -1,4 +1,3 @@
-// D:/my-journal-app/server.js
 import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
@@ -16,22 +15,14 @@ app.use(cors());
 app.use(express.json());
 
 // --- Environment Variable Checks ---
-if (!process.env.MONGODB_URI) { // Corrected variable name
-  console.error("FATAL ERROR: MONGODB_URI environment variable is not defined."); // Corrected variable name
+if (!process.env.MONGODB_URI) {
+  console.error("FATAL ERROR: MONGODB_URI environment variable is not defined.");
   process.exit(1);
 }
 if (!process.env.GEMINI_API_KEY) {
   console.error("FATAL ERROR: GEMINI_API_KEY environment variable is not defined.");
   process.exit(1);
 }
-
-// --- MongoDB Connection ---
-mongoose.connect(process.env.MONGODB_URI) // Corrected variable name
-  .then(() => console.log("MongoDB connected successfully!"))
-  .catch(err => {
-    console.error("MongoDB connection error:", err);
-    process.exit(1);
-  });
 
 // --- Mongoose Schema & Model ---
 const journalEntrySchema = new mongoose.Schema({
@@ -42,10 +33,8 @@ const journalEntrySchema = new mongoose.Schema({
 });
 
 // --- INDEXING ---
-// Index for user/date queries
 journalEntrySchema.index({ user: 1, date: 1 });
-// *** NEW: Add a text index for keyword searching on the 'text' field ***
-journalEntrySchema.index({ text: 'text' });
+journalEntrySchema.index({ text: 'text' }); // Ensure text index exists for $text search
 
 const JournalEntry = mongoose.model('JournalEntry', journalEntrySchema);
 
@@ -63,7 +52,6 @@ app.post('/api/journal', async (req, res) => {
     if (!user || !date || !text || !['Shivam', 'Shreya'].includes(user)) {
       return res.status(400).json({ message: 'Missing or invalid fields (user, date, text)' });
     }
-    // Optional: Validate date format if needed here
     const newEntry = new JournalEntry({ user, date, text });
     await newEntry.save();
     console.log('Journal entry saved:', newEntry);
@@ -85,10 +73,10 @@ app.get('/api/journal/:user', async (req, res) => {
     }
     const query = { user: user };
     if (date) {
-      // Add date validation if needed
+      // Optional: Add date validation if needed
       query.date = date;
     }
-    const entries = await JournalEntry.find(query).sort({ date: -1, createdAt: -1 }); // Sort by date primarily
+    const entries = await JournalEntry.find(query).sort({ date: -1, createdAt: -1 });
     console.log(`Found ${entries.length} entries for query:`, query);
     res.status(200).json(entries);
   } catch (error) {
@@ -98,192 +86,237 @@ app.get('/api/journal/:user', async (req, res) => {
 });
 
 
-// **** UPDATED /api/ai Route ****
+// **** UPDATED /api/ai Route (with History, Flexible Prompt, Corrected Query Logic) ****
 app.post('/api/ai', async (req, res) => {
-  console.log('Received POST /api/ai request:', req.body);
+  console.log('[Server AI] Received POST /api/ai request');
+  let fullPrompt = ""; // Define fullPrompt outside try block to access in catch
   try {
-    const { query, askingUser } = req.body;
+    const { query, askingUser, chatHistory = [] } = req.body;
+    console.log('[Server AI] Parsed request body:', { query, askingUser, historyLength: chatHistory?.length });
 
     if (!query || !askingUser || !['Shivam', 'Shreya'].includes(askingUser)) {
+      console.warn('[Server AI] Invalid request body fields');
       return res.status(400).json({ message: 'Missing or invalid fields (query, askingUser)' });
     }
 
-    // --- Enhanced Context Gathering ---
+    // --- Context Gathering (Journal Entries) ---
+    console.log('[Server AI] Starting journal context fetch...');
     let contextText = "";
-    const otherUser = askingUser === 'Shivam' ? 'Shreya' : 'Shivam';
-    const today = new Date();
-    const todayStr = today.toISOString().split('T')[0];
     let fetchedEntries = [];
     const queryLower = query.toLowerCase();
+    const otherUser = askingUser === 'Shivam' ? 'Shreya' : 'Shivam';
 
-    // Determine target user(s) - default to asking user, check if other user mentioned
+    // Determine Target Users
     let targetUsers = [askingUser];
-    if (queryLower.includes(otherUser.toLowerCase())) {
-        targetUsers.push(otherUser);
-    }
-    // If query mentions "both" or "everyone", include both
-    if (queryLower.includes('both') || queryLower.includes('everyone')) {
-        targetUsers = ['Shivam', 'Shreya'];
-    }
-    targetUsers = [...new Set(targetUsers)]; // Remove duplicates
+    if (queryLower.includes(otherUser.toLowerCase())) targetUsers.push(otherUser);
+    if (queryLower.includes('both') || queryLower.includes('everyone')) targetUsers = ['Shivam', 'Shreya'];
+    targetUsers = [...new Set(targetUsers)];
 
-    // --- Date Parsing Logic ---
+    // --- CORRECTED Filter/Sort/Projection Logic ---
     let dateFilter = null;
-    const dateMatch = query.match(/(\d{4}-\d{2}-\d{2})/); // YYYY-MM-DD
+    const today = new Date(); // Define today here
+    const todayStr = today.toISOString().split('T')[0]; // Define todayStr
+
+    // Date Parsing Logic
+    const dateMatch = query.match(/(\d{4}-\d{2}-\d{2})/);
     const todayMatch = queryLower.includes('today');
     const yesterdayMatch = queryLower.includes('yesterday');
-    const lastWeekMatch = queryLower.includes('last week');
-    // Add more date keywords: "this week", "last month", "since [date]", "between [date] and [date]" etc.
 
     if (dateMatch) {
         dateFilter = { date: dateMatch[1] };
-        console.log(`Date filter: Specific date ${dateMatch[1]}`);
+        console.log(`[Server AI] Date filter: Specific date ${dateMatch[1]}`);
     } else if (todayMatch) {
         dateFilter = { date: todayStr };
-        console.log(`Date filter: Today (${todayStr})`);
+        console.log(`[Server AI] Date filter: Today (${todayStr})`);
     } else if (yesterdayMatch) {
         const yesterday = new Date(today);
         yesterday.setDate(today.getDate() - 1);
         dateFilter = { date: yesterday.toISOString().split('T')[0] };
-        console.log(`Date filter: Yesterday (${dateFilter.date})`);
-    } else if (lastWeekMatch) {
-        const oneWeekAgo = new Date(today);
-        oneWeekAgo.setDate(today.getDate() - 7);
-        // Find entries between one week ago and today (inclusive)
-        dateFilter = {
-            date: {
-                $gte: oneWeekAgo.toISOString().split('T')[0],
-                $lte: todayStr
-            }
-        };
-         console.log(`Date filter: Last week (${dateFilter.date.$gte} to ${dateFilter.date.$lte})`);
+        console.log(`[Server AI] Date filter: Yesterday (${dateFilter.date})`);
     }
-     // Add more complex date range logic here...
+     // (Add more date parsing if needed)
 
-    // --- Keyword Extraction Logic ---
+    // Only look for keywords IF no date filter was found
     let keywordFilter = null;
-    // Simple example: Look for words in quotes or common nouns if no date filter applied
-    // This is basic, more advanced NLP could be used here.
-    if (!dateFilter && queryLower.length > 5) { // Avoid triggering on short queries like "hi"
+    let sortOptions = { date: -1, createdAt: -1 }; // Default sort
+    let projectionOptions = {}; // Default projection
+
+    if (!dateFilter) { // Check if NO date filter exists
+        console.log('[Server AI] No date filter found, checking for keywords...');
+        // Keyword extraction logic
         const keywords = queryLower
-          .replace(/what|how|did|was|is|a|the|for|on|about|tell|me/g, '') // Remove common words
+          .replace(/what|how|did|was|is|a|the|for|on|about|tell|me/g, '') // Basic stop words
           .replace(/[^\w\s]/g, '') // Remove punctuation
-          .trim().split(/\s+/).filter(word => word.length > 3); // Get words longer than 3 chars
+          .trim().split(/\s+/).filter(word => word.length > 3); // Get longer words
 
         if (keywords.length > 0) {
-            // Use MongoDB text search if keywords found
             keywordFilter = { $text: { $search: keywords.join(' ') } };
-            console.log(`Keyword filter: Searching for "${keywords.join(' ')}"`);
+            // IF keyword filter is active, THEN change sort and projection
+            sortOptions = { score: { $meta: "textScore" }, date: -1 };
+            projectionOptions = { score: { $meta: "textScore" } };
+            console.log(`[Server AI] Keyword filter active: Searching for "${keywords.join(' ')}"`);
+        } else {
+            console.log('[Server AI] No relevant keywords found.');
         }
-    }
-
-
-    // --- Build MongoDB Query ---
-    const mongoQuery = { user: { $in: targetUsers } }; // Filter by target user(s)
-
-    if (dateFilter) {
-        // If specific date(s) identified, combine with user filter
-        Object.assign(mongoQuery, dateFilter);
-         console.log(`Fetching entries for user(s): ${targetUsers.join(', ')}, date filter applied.`);
-         fetchedEntries = await JournalEntry.find(mongoQuery)
-                                            .sort({ date: -1, createdAt: -1 }) // Sort by date, then time
-                                            .limit(15); // Limit results for date queries slightly higher
-    } else if (keywordFilter) {
-        // If keywords identified (and no date), use text search combined with user filter
-        Object.assign(mongoQuery, keywordFilter);
-        console.log(`Fetching entries for user(s): ${targetUsers.join(', ')}, keyword filter applied.`);
-        // Text search results are automatically sorted by relevance (textScore)
-        // We add projection to see the score, and then limit
-        fetchedEntries = await JournalEntry.find(
-            mongoQuery,
-            { score: { $meta: "textScore" } } // Project the text search score
-          )
-          .sort({ score: { $meta: "textScore" }, date: -1 }) // Sort by relevance, then date
-          .limit(10); // Limit results for keyword searches
-    } else if (queryLower.includes('how was') || queryLower.includes('what did')) {
-        // Fallback for generic "how was/what did" - get recent entries for target user(s)
-        console.log(`Fetching recent entries for user(s): ${targetUsers.join(', ')} (fallback).`);
-        fetchedEntries = await JournalEntry.find({ user: { $in: targetUsers } }) // Query modified to include all target users
-                                          .sort({ date: -1, createdAt: -1 })
-                                          .limit(5 * targetUsers.length); // Limit recent entries (5 per target user)
     } else {
-        // If no specific criteria met, maybe fetch the very latest entry? Or provide no context.
-        console.log(`No specific date/keyword criteria met. Fetching latest entry for ${targetUsers.join(', ')} as fallback.`);
-         fetchedEntries = await JournalEntry.find({ user: { $in: targetUsers } })
-                                          .sort({ date: -1, createdAt: -1 })
-                                          .limit(1); // Fetch just the single latest entry
+         console.log('[Server AI] Date filter found, skipping keyword search logic.');
     }
+    // --- End Corrected Logic ---
+
+    // Build the final query filter
+    const mongoQuery = { user: { $in: targetUsers } };
+    if (dateFilter) Object.assign(mongoQuery, dateFilter);
+    // Apply keywordFilter ONLY if it exists (which implies dateFilter is null)
+    if (keywordFilter) Object.assign(mongoQuery, keywordFilter);
+
+    // Determine limit
+    // Use fallback limit logic only if neither date nor keyword filter is active
+    let limit = 5 * targetUsers.length; // Default fallback limit
+     if (dateFilter) {
+        limit = 15;
+     } else if (keywordFilter) {
+        limit = 10;
+     } else if (!queryLower.includes('how was') && !queryLower.includes('what did')) {
+         // If it's not a date/keyword search and not a generic 'how was/what did', maybe just get 1?
+         limit = 1;
+     }
 
 
-    // --- Format Context ---
+    // Execute the query
+    console.log('[Server AI] Final Mongo Query Filter:', mongoQuery);
+    console.log('[Server AI] Final Sort Options:', sortOptions);
+    try { // Wrap DB call
+        const findQuery = JournalEntry.find(mongoQuery)
+                                       .sort(sortOptions)
+                                       .limit(limit);
+
+        // Apply projection only if defined (i.e., only for keyword searches)
+        if (Object.keys(projectionOptions).length > 0) {
+             console.log('[Server AI] Applying projection:', projectionOptions);
+             findQuery.projection(projectionOptions);
+        }
+
+        fetchedEntries = await findQuery.exec();
+        console.log(`[Server AI] Fetched ${fetchedEntries?.length} journal entries`);
+    } catch (dbError) {
+        console.error("[Server AI] Database find error:", dbError);
+        // Important: Set contextText here so we inform the AI about the DB error
+        contextText = "Context: There was an issue retrieving journal entries due to a database error.\n";
+        // Don't re-throw, let the function proceed to inform the user via AI if possible
+    }
+    // --- End Database Query Execution ---
+
+
+    // --- Format Journal Context ---
     if (fetchedEntries.length > 0) {
-       contextText = `Here are some relevant journal entries for context (newest first):\n`;
+       // This part only runs if entries were successfully fetched
+       contextText = `Relevant Journal Entries (newest first):\n`;
        fetchedEntries.forEach(entry => {
-         // Include user in context if multiple users' entries were fetched
          const userPrefix = targetUsers.length > 1 ? `${entry.user} ` : '';
          contextText += `- On ${entry.date}, ${userPrefix}wrote: "${entry.text}"\n`;
        });
-       console.log(`Generated context with ${fetchedEntries.length} entries.`);
-    } else {
-        // Refine 'no context' message based on what was searched
-        if (dateFilter) contextText = `Context: No journal entries found for ${targetUsers.join(' or ')} matching the specified date criteria.\n`;
-        else if (keywordFilter) contextText = `Context: No journal entries found for ${targetUsers.join(' or ')} matching the keywords.\n`;
-        else contextText = `Context: No specific journal entries were found relating to the query for ${targetUsers.join(' or ')}.\n`;
-        console.log("Context generated: No relevant entries found.");
+    } else if (!contextText) { // Only set 'no entries found' if DB call didn't error AND length is 0
+        contextText = "Context: No specific journal entries were found relevant to the current query.\n";
     }
-    // --- End Enhanced Context Gathering ---
+    // --- End Context Formatting ---
 
 
-    // --- Refined Prompt Construction ---
-    // Slightly adjust task to allow summarization *based on context*
-    const persona = `You are a helpful and empathetic AI assistant integrated into a personal journal app for a couple, Shivam and Shreya. The user asking the question is ${askingUser}.`;
-    const task = `Your primary goal is to answer ${askingUser}'s questions based *only* on the provided journal entry context, unless the question is clearly a general knowledge query or normal chat. Be concise and understanding. If asked about a day/period with no entry in the context, state that clearly. If asked to summarize based on the context, provide a brief summary *using only information from the provided entries*. Do not make assumptions or provide information not present in the context unless it's general chat.`;
-    const fullPrompt = `${persona}\n\n${task}\n\n${contextText}\n${askingUser}'s query: "${query}"\n\nAssistant's Response:`;
-    // --- End Refined Prompt Construction ---
+    // --- Format Chat History Context ---
+    console.log('[Server AI] Formatting chat history...');
+    let historyText = "";
+    if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
+        historyText = "Recent Conversation History:\n";
+         chatHistory.forEach(msg => {
+            const speaker = msg.sender === 'user' ? askingUser : 'Assistant';
+            historyText += `${speaker}: ${msg.text}\n`;
+         });
+        console.log(`[Server AI] Added ${chatHistory.length} messages to history context.`);
+    }
+    // --- End History Formatting ---
 
-    console.log("----\nSending refined prompt to Gemini:\n", fullPrompt.substring(0, 500) + "...", "\n----"); // Log only beginning of long prompts
 
-    // Call Gemini API
+    // --- MODIFIED Prompt Construction (More Flexible) ---
+    console.log('[Server AI] Constructing full prompt...');
+    const persona = `You are a helpful, empathetic, and thoughtful AI assistant for Shivam and Shreya. You have access to their shared journal context when provided. The user currently asking the question is ${askingUser}. You HAVE access to the journal entries provided in the 'Relevant Journal Entries' context section.`;
+
+    const task = `Your goal is to be a supportive assistant to ${askingUser}.
+1.  Understand the query using conversation history and journal context (if provided).
+2.  If the query asks for information directly present in the 'Relevant Journal Entries' context, provide that information accurately. If the context indicates no relevant entries were found (or if there was an issue retrieving entries), clearly state that.
+3.  Engage naturally in conversation for general chat queries.
+4.  **Flexibility:** If ${askingUser} asks for advice, ideas, seems unsure, or could benefit from a suggestion related to the conversation or journal topics, **feel free to offer helpful, relevant, and empathetic suggestions or ideas.** Make it clear when you are offering a suggestion versus stating a fact from the journal (e.g., start suggestions with "Maybe you could try...", "Have you considered...", "One idea might be...").
+5.  Prioritize being helpful and supportive. Don't strictly limit yourself to only the provided context if a helpful suggestion comes to mind, but *do not invent* false journal entries or information.`;
+
+    fullPrompt = `${persona}\n\n${task}\n\n${historyText}\n${contextText}\n${askingUser}'s current query: "${query}"\n\nAssistant's Response:`;
+    // --- End Prompt Construction ---
+
+
+    // --- Gemini Call ---
+    console.log('[Server AI] ABOUT TO CALL Gemini API...');
     const result = await geminiModel.generateContent(fullPrompt);
-    const response = await result.response;
+    console.log('[Server AI] COMPLETED Gemini API call');
 
-    // Handle potential lack of response or safety blocks (same as before)
+    const response = await result.response;
+    console.log('[Server AI] Got response object from Gemini result');
+
+    // Handle potential lack of response or safety blocks
     if (!response || !response.text) {
-      // ... (keep existing block/error handling logic here) ...
+       console.error('[Server AI] Gemini response blocked or empty', response?.promptFeedback || response?.candidates);
        const blockReason = response?.promptFeedback?.blockReason;
         if (blockReason) {
-            console.warn("Gemini response blocked:", blockReason);
+            // Make sure to return after sending response
             return res.status(400).json({ message: `Response blocked due to: ${blockReason}` });
         } else {
-             console.warn("Gemini returned no text content.");
              const candidates = response?.candidates;
              if(candidates && candidates[0]?.finishReason && candidates[0].finishReason !== 'STOP') {
-                console.warn("Gemini finish reason:", candidates[0].finishReason);
+                console.warn("[Server AI] Gemini finish reason:", candidates[0].finishReason);
+                 // Make sure to return after sending response
                 return res.status(400).json({ message: `Response generation stopped due to: ${candidates[0].finishReason}` });
              }
-             // Check if there's any text, even if finishReason isn't STOP (sometimes happens)
              const potentialText = candidates?.[0]?.content?.parts?.[0]?.text;
              if (potentialText) {
-                console.log("Received partial response from Gemini:", potentialText);
+                console.log("[Server AI] Received partial response from Gemini:", potentialText);
+                 // Make sure to return after sending response
                 return res.status(200).json({ response: potentialText });
              }
+              // Make sure to return after sending response
              return res.status(500).json({ message: 'AI returned an empty response.' });
         }
     }
 
     const aiResponseText = response.text();
-    console.log("Received response from Gemini:", aiResponseText);
+    console.log("[Server AI] Received text response from Gemini:", aiResponseText.substring(0, 100) + "...");
+
+    // --- Sending Response ---
+    console.log('[Server AI] Sending successful response to client');
     res.status(200).json({ response: aiResponseText });
 
   } catch (error) {
-    console.error("Error interacting with AI:", error);
-    if (error.message && error.message.includes('SAFETY')) {
-         res.status(400).json({ message: 'Request failed due to safety settings.', error: error.message });
-    } else {
-       res.status(500).json({ message: 'Failed to get AI response', error: error.message });
+    // Log the specific error occurring on the backend
+    console.error("[Server AI] Error in /api/ai route:", error);
+    // Log the prompt that might have caused the error
+    if (fullPrompt) {
+        console.error("[Server AI] Prompt that failed (first 500 chars):", fullPrompt.substring(0, 500));
     }
+    // Ensure an error response is sent back to the client
+    res.status(500).json({ message: 'Failed to get AI response', error: error.message });
   }
 });
 
 
-export default app;
+// --- Connect to DB THEN Start Server ---
+console.log('[Server] Attempting MongoDB connection...');
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => {
+    console.log("[Server] MongoDB connected successfully!");
+    // Start the Express server ONLY AFTER successful DB connection
+    app.listen(PORT, () => {
+      console.log(`[Server] Backend server listening on port ${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error("[Server] Initial MongoDB connection error:", err);
+    process.exit(1);
+  });
+
+
+export default app; // Keep this for Vercel deployment

@@ -1,13 +1,9 @@
-// src/pages/AiAssistantPage.jsx
-// Page featuring a chat interface to interact with the simulated AI assistant.
-
 import React, { useState, useEffect, useRef } from 'react';
 import { useAppContext } from '../context/AppContext'; // Import context hook
 import UserSwitcher from '../components/UserSwitcher'; // Import user selection component
 import { Bot, User, Send, Home, Loader2 } from 'lucide-react'; // Import icons
 
 // --- Simplified Shadcn UI Inspired Components ---
-// NOTE: See comment in UserSwitcher.jsx about component location in larger apps.
 const Button = ({ children, onClick, variant = 'default', size = 'default', className = '', disabled, ...props }) => {
   const baseStyle = "inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50";
   const variants = {
@@ -87,23 +83,31 @@ const AiAssistantPage = () => {
 
   /**
    * Handles sending the user's query to the simulated AI.
+   * NOW SENDS RECENT CHAT HISTORY ALONG WITH THE QUERY.
    */
   const handleSendQuery = async () => {
     // Prevent sending empty messages or sending while AI is busy
     if (!inputQuery.trim() || isLoading) return;
 
-    // Add the user's message to the chat display
     const userMessage = { sender: 'user', text: inputQuery };
-    setMessages(prev => [...prev, userMessage]);
+    // Create the updated message list *before* calling askAI
+    const updatedMessages = [...messages, userMessage];
+    setMessages(updatedMessages); // Update UI immediately with user message
+
+    // Prepare the recent chat history (e.g., last 6 messages)
+    // Slice(-7, -1) gets up to 6 messages *before* the current user query
+    const recentHistory = updatedMessages.slice(-7, -1);
+
     const currentQuery = inputQuery; // Capture the query before clearing the input
     setInputQuery(''); // Clear the input field
     setIsLoading(true); // Set loading state
 
     try {
-        // Call the simulated AI function from context
-        const aiResponseText = await askAI(currentQuery, currentUser);
-        // Add the AI's response to the chat display
+        // Call the AI function from context, passing the current query, user, and recent history
+        const aiResponseText = await askAI(currentQuery, currentUser, recentHistory);
+
         const aiMessage = { sender: 'ai', text: aiResponseText };
+        // Use functional update based on the state *at the time the response arrives*
         setMessages(prev => [...prev, aiMessage]);
     } catch (error) {
         // Handle potential errors from the simulated AI function
@@ -234,4 +238,4 @@ const AiAssistantPage = () => {
   );
 };
 
-export default AiAssistantPage; // Export the component
+export default AiAssistantPage;
